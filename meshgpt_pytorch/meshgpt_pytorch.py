@@ -678,6 +678,7 @@ class MeshAutoencoder(Module):
         self,
         *,
         vertices:         Float['b nv 3'],
+        vertex_normals:   Float['b nv 3'],  # Include vertex normals -J
         faces:            Int['b nf nvf'],
         face_edges:       Int['b e 2'],
         face_mask:        Bool['b nf'],
@@ -692,17 +693,35 @@ class MeshAutoencoder(Module):
         nvf - number of vertices per face (3 or 4) - triangles vs quads
         c - coordinates (3)
         d - embed dim
+        mv -  -J
         """
 
         _, num_faces, num_vertices_per_face = faces.shape
 
         assert self.num_vertices_per_face == num_vertices_per_face
 
+        # Sets the faces to 0 wherever face_mask is false -J
+        # Some shapes have fewer faces, hence we pad to have consistent input to the autoencoder
         face_without_pad = faces.masked_fill(~rearrange(face_mask, 'b nf -> b nf 1'), 0)
+
+        # Print shapes before running get_at
+        print(f"vertices shape: {vertices.shape}")  # Should be (b, nv, c)
+        print(f"face_without_pad shape: {face_without_pad.shape}")  # Should be (b, nf, mv)
+        print(f"vertex_normals shape: {vertex_normals.shape}")  # Should be (b, nv, c)
 
         # continuous face coords
 
         face_coords = get_at('b [nv] c, b nf mv -> b nf mv c', vertices, face_without_pad)
+
+
+        # really frustrating quickfix because the dimensions of vertex is [136, 3]-J
+        vertex_normals = vertex_normals.unsqueeze(0)  # Add a batch dimension, shape becomes [1, 136, 3]
+
+
+
+        # continuous face normals -J
+
+        face_normals = get_at('b [nv] c, b nf mv -> b nf mv c', vertex_normals, face_without_pad)
 
         # compute derived features and embed
 
@@ -717,17 +736,21 @@ class MeshAutoencoder(Module):
         discrete_normal = self.discretize_normals(derived_features['normals'])
         normal_embed = self.normal_embed(discrete_normal)
 
+        # Embed vertex normals -J
+        discrete_vertex_normals = self.discretize_normals(face_normals) # -J
+        vertex_normal_embed = self.normal_embed(discrete_vertex_normals) # -J
+
         # discretize vertices for face coordinate embedding
 
         discrete_face_coords = self.discretize_face_coords(face_coords)
-        discrete_face_coords = rearrange(discrete_face_coords, 'b nf nv c -> b nf (nv c)') # 9 or 12 coordinates per face
+        discrete_face_coords = rearrange(discrete_face_coords, 'b nf nv c -> b nf (nv c)')  # 9 or 12 coordinates per face
 
         face_coor_embed = self.coor_embed(discrete_face_coords)
         face_coor_embed = rearrange(face_coor_embed, 'b nf c d -> b nf (c d)')
 
         # combine all features and project into model dimension
 
-        face_embed, _ = pack([face_coor_embed, angle_embed, area_embed, normal_embed], 'b nf *')
+        face_embed, _ = pack([face_coor_embed, angle_embed, area_embed, normal_embed, vertex_normal_embed], 'b nf *')
         face_embed = self.project_in(face_embed)
 
         # handle variable lengths by using masked_select and masked_scatter
@@ -970,6 +993,7 @@ class MeshAutoencoder(Module):
         self,
         *,
         vertices:       Float['b nv 3'],
+        vertex_normals: Float['b nv 3'],  # Include vertex normals -J
         faces:          Int['b nf nvf'],
         face_edges:     Int['b e 2'] | None = None,
         return_codes = False,
@@ -988,6 +1012,7 @@ class MeshAutoencoder(Module):
 
         encoded, face_coordinates = self.encode(
             vertices = vertices,
+            vertex_normals = vertex_normals,  # Pass vertex normals -J
             faces = faces,
             face_edges = face_edges,
             face_edges_mask = face_edges_mask,
@@ -1059,7 +1084,7 @@ class MeshAutoencoder(Module):
         # calculate total loss
 
         total_loss = recon_loss + \
-                     commit_loss.sum() * self.commit_loss_weight
+                    commit_loss.sum() * self.commit_loss_weight
 
         # calculate loss breakdown if needed
 
@@ -1077,6 +1102,7 @@ class MeshAutoencoder(Module):
             return total_loss, loss_breakdown
 
         return recon_faces, total_loss, loss_breakdown
+
 
 @save_load(version = __version__)
 class MeshTransformer(Module, PyTorchModelHubMixin):
